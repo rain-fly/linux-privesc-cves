@@ -9,22 +9,21 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; echo "[INFO] $1" >> "$LOG_FILE"; }
-warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; echo "[WARN] $1" >> "$LOG_FILE"; }
-error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; echo "[ERROR] $1" >> "$LOG_FILE"; }
-pass()  { printf "${GREEN}[PASS]${NC} %s\n" "$1"; echo "[PASS] $1" >> "$LOG_FILE"; }
-fail()  { printf "${RED}[FAIL]${NC} %s\n" "$1"; echo "[FAIL] $1" >> "$LOG_FILE"; }
+info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
+warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
+error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
+pass()  { printf "${GREEN}[PASS]${NC} %s\n" "$1"; }
+fail()  { printf "${RED}[FAIL]${NC} %s\n" "$1"; }
 
 print_kv() {
     key="$1"
     value="$2"
     printf '%s: %s\n' "$key" "$value"
-    echo "$key: $value" >> "$LOG_FILE"
 }
 
 confirm() {
     printf "%s [y/N]: " "$1"
-    read -r answer
+    read -r answer </dev/tty
     case "$answer" in
         [yY][eE][sS]|[yY]) return 0 ;;
         *) return 1 ;;
@@ -62,14 +61,14 @@ sanitize_for_filename() {
 }
 
 mitigate_copy_fail() {
-    echo "=== 缓解 Copy Fail / CVE-2026-31431 ===" | tee -a "$LOG_FILE"
+    echo "=== 缓解 Copy Fail / CVE-2026-31431 ==="
 
     algif_loaded="$(lsmod 2>/dev/null | grep -w algif_aead || true)"
     af_alg_usage="$(lsof 2>/dev/null | grep AF_ALG || true)"
 
     if [ -n "$af_alg_usage" ]; then
         warn "检测到进程正在使用 AF_ALG："
-        echo "$af_alg_usage" | tee -a "$LOG_FILE"
+        echo "$af_alg_usage"
         if ! confirm "继续禁用 algif_aead 可能影响上述进程，是否继续？"; then
             info "跳过 algif_aead 禁用"
             return
@@ -91,7 +90,7 @@ mitigate_copy_fail() {
 }
 
 mitigate_dirty_frag() {
-    echo "=== 缓解 Dirty Frag ===" | tee -a "$LOG_FILE"
+    echo "=== 缓解 Dirty Frag ==="
 
     esp4_loaded="$(lsmod 2>/dev/null | grep -w esp4 || true)"
     esp6_loaded="$(lsmod 2>/dev/null | grep -w esp6 || true)"
@@ -127,8 +126,8 @@ EOF
 }
 
 verify_mitigation() {
-    echo "" | tee -a "$LOG_FILE"
-    echo "=== 验证缓解措施 ===" | tee -a "$LOG_FILE"
+    echo ""
+    echo "=== 验证缓解措施 ==="
 
     all_pass=true
 
@@ -136,9 +135,9 @@ verify_mitigation() {
     conf_file="/etc/modprobe.d/disable-vuln-modules.conf"
     if [ -f "$conf_file" ]; then
         pass "配置文件已写入: $conf_file"
-        echo "--- 配置文件内容 ---" | tee -a "$LOG_FILE"
-        cat "$conf_file" | tee -a "$LOG_FILE"
-        echo "--- 配置文件结束 ---" | tee -a "$LOG_FILE"
+        echo "--- 配置文件内容 ---"
+        cat "$conf_file"
+        echo "--- 配置文件结束 ---"
     else
         fail "配置文件不存在: $conf_file"
         all_pass=false
@@ -154,7 +153,7 @@ verify_mitigation() {
     done
 
     # 3. 尝试加载模块，应该失败
-    echo "" | tee -a "$LOG_FILE"
+    echo ""
     info "尝试加载已禁用的模块（预期失败）..."
     for mod in algif_aead esp4 esp6 rxrpc; do
         if modprobe "$mod" 2>/dev/null; then
@@ -166,7 +165,7 @@ verify_mitigation() {
     done
 
     # 4. 最终结论
-    echo "" | tee -a "$LOG_FILE"
+    echo ""
     if [ "$all_pass" = true ]; then
         pass "所有模块已封锁完毕，缓解措施生效"
     else
@@ -175,7 +174,7 @@ verify_mitigation() {
 }
 
 rollback() {
-    echo "=== 回滚所有缓解措施 ===" | tee -a "$LOG_FILE"
+    echo "=== 回滚所有缓解措施 ==="
     conf_file="/etc/modprobe.d/disable-vuln-modules.conf"
     if [ -f "$conf_file" ]; then
         rm -f "$conf_file"
@@ -199,7 +198,7 @@ show_usage() {
     echo "  $0 rollback       # 回滚"
 }
 
-# 初始化日志
+# 初始化
 PRIMARY_IP="$(get_primary_ip)"
 SAFE_IP="$(sanitize_for_filename "$PRIMARY_IP")"
 TIME_TAG="$(date '+%Y%m%d_%H%M%S' 2>/dev/null)"
@@ -208,6 +207,7 @@ LOG_FILE="./漏洞修复_${SAFE_IP}_${TIME_TAG}.log"
 
 check_root
 
+# 所有输出同时写入 stdout 和日志文件
 {
     echo "漏洞修复报告"
     echo "generated_at: $(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
@@ -215,26 +215,26 @@ check_root
     print_kv primary_ip "$PRIMARY_IP"
     print_kv log_file "$LOG_FILE"
     echo
-} > "$LOG_FILE"
 
-case "${1:-}" in
-    mitigate-all)
-        mitigate_copy_fail
-        echo
-        mitigate_dirty_frag
-        verify_mitigation
-        ;;
-    verify)
-        verify_mitigation
-        ;;
-    rollback)
-        rollback
-        ;;
-    *)
-        show_usage
-        exit 1
-        ;;
-esac
+    case "${1:-}" in
+        mitigate-all)
+            mitigate_copy_fail
+            echo
+            mitigate_dirty_frag
+            verify_mitigation
+            ;;
+        verify)
+            verify_mitigation
+            ;;
+        rollback)
+            rollback
+            ;;
+        *)
+            show_usage
+            exit 1
+            ;;
+    esac
 
-echo ""
-info "日志已保存到: $LOG_FILE"
+    echo ""
+    info "日志已保存到: $LOG_FILE"
+} 2>&1 | tee "$LOG_FILE"
