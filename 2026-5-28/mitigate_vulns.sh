@@ -4,16 +4,23 @@
 # 适用漏洞：Copy Fail (CVE-2026-31431)、Dirty Frag
 # 注意：执行前请评估业务影响，禁用模块可能影响 IPsec 等正常功能
 
-set -e
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
-info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; }
-warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; }
-error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; }
+info()  { printf "${GREEN}[INFO]${NC} %s\n" "$1"; echo "[INFO] $1" >> "$LOG_FILE"; }
+warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$1"; echo "[WARN] $1" >> "$LOG_FILE"; }
+error() { printf "${RED}[ERROR]${NC} %s\n" "$1"; echo "[ERROR] $1" >> "$LOG_FILE"; }
+pass()  { printf "${GREEN}[PASS]${NC} %s\n" "$1"; echo "[PASS] $1" >> "$LOG_FILE"; }
+fail()  { printf "${RED}[FAIL]${NC} %s\n" "$1"; echo "[FAIL] $1" >> "$LOG_FILE"; }
+
+print_kv() {
+    key="$1"
+    value="$2"
+    printf '%s: %s\n' "$key" "$value"
+    echo "$key: $value" >> "$LOG_FILE"
+}
 
 confirm() {
     printf "%s [y/N]: " "$1"
@@ -31,15 +38,38 @@ check_root() {
     fi
 }
 
+get_primary_ip() {
+    primary_ip=""
+    if command -v ip >/dev/null 2>&1; then
+        primary_ip=$(ip -o -4 addr show scope global 2>/dev/null | awk 'NR==1 {print $4}' | cut -d/ -f1)
+        if [ -n "$primary_ip" ]; then
+            printf '%s\n' "$primary_ip"
+            return
+        fi
+    fi
+    if command -v hostname >/dev/null 2>&1; then
+        primary_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+        if [ -n "$primary_ip" ]; then
+            printf '%s\n' "$primary_ip"
+            return
+        fi
+    fi
+    printf 'unknown'
+}
+
+sanitize_for_filename() {
+    printf '%s\n' "$1" | sed 's/[:\/ ]/_/g'
+}
+
 mitigate_copy_fail() {
-    echo "=== 缓解 Copy Fail / CVE-2026-31431 ==="
+    echo "=== 缓解 Copy Fail / CVE-2026-31431 ===" | tee -a "$LOG_FILE"
 
     algif_loaded="$(lsmod 2>/dev/null | grep -w algif_aead || true)"
     af_alg_usage="$(lsof 2>/dev/null | grep AF_ALG || true)"
 
     if [ -n "$af_alg_usage" ]; then
         warn "检测到进程正在使用 AF_ALG："
-        echo "$af_alg_usage"
+        echo "$af_alg_usage" | tee -a "$LOG_FILE"
         if ! confirm "继续禁用 algif_aead 可能影响上述进程，是否继续？"; then
             info "跳过 algif_aead 禁用"
             return
@@ -47,7 +77,7 @@ mitigate_copy_fail() {
     fi
 
     info "写入 modprobe 禁用配置..."
-    echo "install algif_aead /bin/false" > /etc/modprobe.d/disable-algif-aead.conf
+    echo "install algif_aead /bin/false" >> /etc/modprobe.d/disable-vuln-modules.conf
 
     if [ -n "$algif_loaded" ]; then
         info "卸载 algif_aead 模块..."
@@ -61,7 +91,7 @@ mitigate_copy_fail() {
 }
 
 mitigate_dirty_frag() {
-    echo "=== 缓解 Dirty Frag ==="
+    echo "=== 缓解 Dirty Frag ===" | tee -a "$LOG_FILE"
 
     esp4_loaded="$(lsmod 2>/dev/null | grep -w esp4 || true)"
     esp6_loaded="$(lsmod 2>/dev/null | grep -w esp6 || true)"
@@ -79,7 +109,7 @@ mitigate_dirty_frag() {
     fi
 
     info "写入 modprobe 禁用配置..."
-    cat > /etc/modprobe.d/dirtyfrag.conf <<'EOF'
+    cat >> /etc/modprobe.d/disable-vuln-modules.conf <<'EOF'
 install esp4 /bin/false
 install esp6 /bin/false
 install rxrpc /bin/false
@@ -96,23 +126,62 @@ EOF
     info "Dirty Frag 缓解完成"
 }
 
-rollback_copy_fail() {
-    echo "=== 回滚 Copy Fail 缓解 ==="
-    if [ -f /etc/modprobe.d/disable-algif-aead.conf ]; then
-        rm -f /etc/modprobe.d/disable-algif-aead.conf
-        info "已删除 /etc/modprobe.d/disable-algif-aead.conf"
+verify_mitigation() {
+    echo "" | tee -a "$LOG_FILE"
+    echo "=== 验证缓解措施 ===" | tee -a "$LOG_FILE"
+
+    all_pass=true
+
+    # 1. 验证配置文件存在
+    conf_file="/etc/modprobe.d/disable-vuln-modules.conf"
+    if [ -f "$conf_file" ]; then
+        pass "配置文件已写入: $conf_file"
+        echo "--- 配置文件内容 ---" | tee -a "$LOG_FILE"
+        cat "$conf_file" | tee -a "$LOG_FILE"
+        echo "--- 配置文件结束 ---" | tee -a "$LOG_FILE"
     else
-        info "未发现 Copy Fail 缓解配置，无需回滚"
+        fail "配置文件不存在: $conf_file"
+        all_pass=false
+    fi
+
+    # 2. 卸载残留模块
+    for mod in algif_aead esp4 esp6 rxrpc; do
+        loaded="$(lsmod 2>/dev/null | grep -w "$mod" || true)"
+        if [ -n "$loaded" ]; then
+            warn "模块 $mod 仍已加载，尝试卸载..."
+            rmmod "$mod" 2>/dev/null && info "$mod 卸载成功" || warn "$mod 卸载失败"
+        fi
+    done
+
+    # 3. 尝试加载模块，应该失败
+    echo "" | tee -a "$LOG_FILE"
+    info "尝试加载已禁用的模块（预期失败）..."
+    for mod in algif_aead esp4 esp6 rxrpc; do
+        if modprobe "$mod" 2>/dev/null; then
+            fail "模块 $mod 仍可加载，禁用未生效"
+            all_pass=false
+        else
+            pass "模块 $mod 已被封锁，无法加载"
+        fi
+    done
+
+    # 4. 最终结论
+    echo "" | tee -a "$LOG_FILE"
+    if [ "$all_pass" = true ]; then
+        pass "所有模块已封锁完毕，缓解措施生效"
+    else
+        fail "部分模块封锁未生效，请检查配置"
     fi
 }
 
-rollback_dirty_frag() {
-    echo "=== 回滚 Dirty Frag 缓解 ==="
-    if [ -f /etc/modprobe.d/dirtyfrag.conf ]; then
-        rm -f /etc/modprobe.d/dirtyfrag.conf
-        info "已删除 /etc/modprobe.d/dirtyfrag.conf"
+rollback() {
+    echo "=== 回滚所有缓解措施 ===" | tee -a "$LOG_FILE"
+    conf_file="/etc/modprobe.d/disable-vuln-modules.conf"
+    if [ -f "$conf_file" ]; then
+        rm -f "$conf_file"
+        info "已删除 $conf_file"
     else
-        info "未发现 Dirty Frag 缓解配置，无需回滚"
+        info "未发现缓解配置，无需回滚"
     fi
 }
 
@@ -120,37 +189,52 @@ show_usage() {
     echo "用法: $0 <action>"
     echo ""
     echo "Action:"
-    echo "  mitigate-copy-fail    缓解 Copy Fail (CVE-2026-31431)"
-    echo "  mitigate-dirty-frag   缓解 Dirty Frag"
-    echo "  mitigate-all          缓解所有漏洞"
-    echo "  rollback-copy-fail    回滚 Copy Fail 缓解"
-    echo "  rollback-dirty-frag   回滚 Dirty Frag 缓解"
-    echo "  rollback-all          回滚所有缓解"
+    echo "  mitigate-all    缓解所有漏洞并验证"
+    echo "  verify          仅验证缓解措施是否生效"
+    echo "  rollback        回滚所有缓解"
     echo ""
     echo "示例:"
-    echo "  $0 mitigate-all       # 缓解所有漏洞"
-    echo "  $0 rollback-all       # 回滚所有缓解"
+    echo "  $0 mitigate-all   # 缓解 + 验证"
+    echo "  $0 verify         # 仅验证"
+    echo "  $0 rollback       # 回滚"
 }
+
+# 初始化日志
+PRIMARY_IP="$(get_primary_ip)"
+SAFE_IP="$(sanitize_for_filename "$PRIMARY_IP")"
+TIME_TAG="$(date '+%Y%m%d_%H%M%S' 2>/dev/null)"
+[ -n "$TIME_TAG" ] || TIME_TAG="unknown_time"
+LOG_FILE="./漏洞修复_${SAFE_IP}_${TIME_TAG}.log"
 
 check_root
 
+{
+    echo "漏洞修复报告"
+    echo "generated_at: $(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+    print_kv host_name "$(hostname 2>/dev/null)"
+    print_kv primary_ip "$PRIMARY_IP"
+    print_kv log_file "$LOG_FILE"
+    echo
+} > "$LOG_FILE"
+
 case "${1:-}" in
-    mitigate-copy-fail)  mitigate_copy_fail ;;
-    mitigate-dirty-frag) mitigate_dirty_frag ;;
     mitigate-all)
         mitigate_copy_fail
         echo
         mitigate_dirty_frag
+        verify_mitigation
         ;;
-    rollback-copy-fail)  rollback_copy_fail ;;
-    rollback-dirty-frag) rollback_dirty_frag ;;
-    rollback-all)
-        rollback_copy_fail
-        echo
-        rollback_dirty_frag
+    verify)
+        verify_mitigation
+        ;;
+    rollback)
+        rollback
         ;;
     *)
         show_usage
         exit 1
         ;;
 esac
+
+echo ""
+info "日志已保存到: $LOG_FILE"
