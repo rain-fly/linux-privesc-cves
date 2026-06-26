@@ -10,8 +10,32 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-# 新密码
-NEW_PASSWORD="Up19MA4mj1wjRK"
+# 密码长度
+PASSWORD_LENGTH=12
+
+# 生成符合要求的随机密码
+generate_password() {
+    local lower="abcdefghijklmnopqrstuvwxyz"
+    local upper="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    local digits="0123456789"
+    local special='`~!@#$%^&*()-_=+\|[{]};:'"'"'",<.>/?'
+
+    # 确保每种字符至少一个
+    local password=""
+    password+="${lower:RANDOM%${#lower}:1}"
+    password+="${upper:RANDOM%${#upper}:1}"
+    password+="${digits:RANDOM%${#digits}:1}"
+    password+="${special:RANDOM%${#special}:1}"
+
+    # 填充剩余长度
+    local all_chars="${lower}${upper}${digits}${special}"
+    for i in $(seq 1 $((PASSWORD_LENGTH - 4))); do
+        password+="${all_chars:RANDOM%${#all_chars}:1}"
+    done
+
+    # 打乱密码顺序
+    echo "$password" | fold -w1 | shuf | tr -d '\n'
+}
 
 # 检查 root 权限
 if [ "$(id -u)" -ne 0 ]; then
@@ -23,6 +47,9 @@ echo "==========================================================================
 echo "                    紧急密码重置脚本"
 echo "================================================================================"
 echo ""
+
+# 生成随机密码
+NEW_PASSWORD=$(generate_password)
 
 # 1. 重置密码
 echo -e "${YELLOW}[1/6]${NC} 重置 root 密码..."
