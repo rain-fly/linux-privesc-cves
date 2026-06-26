@@ -1,0 +1,8 @@
+{
+    "java.compile.nullAnalysis.mode": "automatic",
+      // 控制窗口标题栏的显示格式
+  "window.title": "${rootName}${separator}${appName}",
+  "window.titleSeparator": " - ",
+  // 显示包含路径的编辑器标签
+  "editor.tabSizing": "fit"
+}
